@@ -39,7 +39,10 @@ import { errors } from "./error"
 import { QuestionRoutes } from "./routes/question"
 import { PermissionRoutes } from "./routes/permission"
 import { GlobalRoutes } from "./routes/global"
+import { AuthRoutes } from "./routes/auth"
 import { MDNS } from "./mdns"
+import { SessionRegistry } from "./session-registry"
+import { ServerAuth } from "./auth"
 
 // @ts-ignore This global is needed to prevent ai-sdk from logging warnings to stdout https://github.com/vercel/ai/blob/2dc67e0ef538307f21368db32d5a12345d98831b/packages/ai/src/logger/log-warnings.ts#L85
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -184,6 +187,7 @@ export namespace Server {
             return c.json(true)
           },
         )
+        .route("/auth", AuthRoutes())
         .use(async (c, next) => {
           if (c.req.path === "/log") return next()
           const raw = c.req.query("directory") || c.req.header("x-opencode-directory") || process.cwd()
@@ -491,32 +495,62 @@ export namespace Server {
               },
             },
           }),
+          validator(
+            "query",
+            z.object({
+              sessionID: z.string().optional().meta({ description: "filter events by session id" }),
+              clientID: z.string().optional().meta({ description: "client id for tracking" }),
+            }),
+          ),
           async (c) => {
-            log.info("event connected")
+            const { sessionID, clientID } = c.req.valid("query")
+            log.info("event connected", { sessionID, clientID })
+
+            // update activity if we have session and client info
+            if (sessionID && clientID) {
+              SessionRegistry.updateActivity(sessionID, clientID)
+            }
+
             return streamSSE(c, async (stream) => {
               stream.writeSSE({
                 data: JSON.stringify({
                   type: "server.connected",
-                  properties: {},
+                  properties: { sessionID, clientID },
                 }),
               })
               const unsub = Bus.subscribeAll(async (event) => {
+                // filter events by session if provided
+                if (sessionID && "sessionID" in event.properties && event.properties.sessionID !== sessionID) {
+                  return
+                }
+
                 await stream.writeSSE({
                   data: JSON.stringify(event),
                 })
+
+                // update client activity on any event
+                if (sessionID && clientID) {
+                  SessionRegistry.updateActivity(sessionID, clientID)
+                }
+
                 if (event.type === Bus.InstanceDisposed.type) {
                   stream.close()
                 }
               })
 
-              // Send heartbeat every 30s to prevent WKWebView timeout (60s default)
+              // send heartbeat every 30s to prevent wkwebview timeout (60s default)
               const heartbeat = setInterval(() => {
                 stream.writeSSE({
                   data: JSON.stringify({
                     type: "server.heartbeat",
-                    properties: {},
+                    properties: { sessionID, clientID },
                   }),
                 })
+
+                // update activity on heartbeat
+                if (sessionID && clientID) {
+                  SessionRegistry.updateActivity(sessionID, clientID)
+                }
               }, 30000)
 
               await new Promise<void>((resolve) => {
@@ -524,7 +558,12 @@ export namespace Server {
                   clearInterval(heartbeat)
                   unsub()
                   resolve()
-                  log.info("event disconnected")
+                  log.info("event disconnected", { sessionID, clientID })
+
+                  // detach client on disconnect
+                  if (sessionID && clientID) {
+                    SessionRegistry.detachClient(sessionID, clientID)
+                  }
                 })
               })
             })
@@ -563,7 +602,7 @@ export namespace Server {
     return result
   }
 
-  export function listen(opts: {
+  export async function listen(opts: {
     port: number
     hostname: string
     mdns?: boolean
@@ -571,6 +610,10 @@ export namespace Server {
     cors?: string[]
   }) {
     _corsWhitelist = opts.cors ?? []
+
+    // initialize auth and session registry
+    await ServerAuth.init()
+    await SessionRegistry.init()
 
     const args = {
       hostname: opts.hostname,
@@ -605,6 +648,7 @@ export namespace Server {
     const originalStop = server.stop.bind(server)
     server.stop = async (closeActiveConnections?: boolean) => {
       if (shouldPublishMDNS) MDNS.unpublish()
+      SessionRegistry.shutdown()
       return originalStop(closeActiveConnections)
     }
 

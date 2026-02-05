@@ -23,6 +23,9 @@ import type { Provider } from "@/provider/provider"
 import { PermissionNext } from "@/permission/next"
 import { Global } from "@/global"
 
+// lazy import to avoid circular dependency
+const getSessionRegistry = () => import("../server/session-registry").then((m) => m.SessionRegistry)
+
 export namespace Session {
   const log = Log.create({ service: "session" })
 
@@ -229,6 +232,15 @@ export namespace Session {
     Bus.publish(Event.Created, {
       info: result,
     })
+
+    // register session in global registry
+    try {
+      const SessionRegistry = await getSessionRegistry()
+      SessionRegistry.register(result, Instance.id)
+    } catch (err) {
+      log.warn("failed to register session in registry", { error: err })
+    }
+
     const cfg = await Config.get()
     if (!result.parentID && (Flag.OPENCODE_AUTO_SHARE || cfg.share === "auto"))
       share(result.id)
@@ -238,7 +250,7 @@ export namespace Session {
           })
         })
         .catch(() => {
-          // Silently ignore sharing errors during session creation
+          // silently ignore sharing errors during session creation
         })
     Bus.publish(Event.Updated, {
       info: result,

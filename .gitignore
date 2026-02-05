@@ -27,3 +27,9 @@ target
 opencode-dev
 logs/
 *.bun-build
+
+# Claude and OpenCode local files
+.claude/
+.opencode/
+**/.claude
+**/.opencode

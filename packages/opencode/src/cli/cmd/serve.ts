@@ -9,10 +9,10 @@ export const ServeCommand = cmd({
   describe: "starts a headless opencode server",
   handler: async (args) => {
     if (!Flag.OPENCODE_SERVER_PASSWORD) {
-      console.log("Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured.")
+      console.log("warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured.")
     }
     const opts = await resolveNetworkOptions(args)
-    const server = Server.listen(opts)
+    const server = await Server.listen(opts)
     console.log(`opencode server listening on http://${server.hostname}:${server.port}`)
     await new Promise(() => {})
     await server.stop()

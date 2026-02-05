@@ -16,6 +16,7 @@ import { Log } from "../../util/log"
 import { PermissionNext } from "@/permission/next"
 import { errors } from "../error"
 import { lazy } from "../../util/lazy"
+import { SessionRegistry } from "../session-registry"
 
 const log = Log.create({ service: "server" })
 
@@ -934,6 +935,165 @@ export const SessionRoutes = lazy(() =>
           reply: c.req.valid("json").response,
         })
         return c.json(true)
+      },
+    )
+    .get(
+      "/global",
+      describeRoute({
+        summary: "list all active sessions",
+        description: "get all sessions from the global registry, across all instances",
+        operationId: "session.global",
+        responses: {
+          200: {
+            description: "list of all sessions",
+            content: {
+              "application/json": {
+                schema: resolver(SessionRegistry.SessionEntry.array()),
+              },
+            },
+          },
+        },
+      }),
+      validator(
+        "query",
+        z.object({
+          activeOnly: z.coerce
+            .boolean()
+            .optional()
+            .meta({ description: "only return sessions with connected clients" }),
+        }),
+      ),
+      async (c) => {
+        const { activeOnly } = c.req.valid("query")
+        const sessions = activeOnly ? SessionRegistry.getActiveSessions() : SessionRegistry.getAllSessions()
+        return c.json(sessions)
+      },
+    )
+    .post(
+      "/:sessionID/attach",
+      describeRoute({
+        summary: "attach client to session",
+        description: "connect a client to an existing session for multi-client support",
+        operationId: "session.attach",
+        responses: {
+          200: {
+            description: "client attached successfully",
+            content: {
+              "application/json": {
+                schema: resolver(
+                  z.object({
+                    success: z.boolean(),
+                    clientID: z.string(),
+                    session: SessionRegistry.SessionEntry,
+                  }),
+                ),
+              },
+            },
+          },
+          ...errors(400, 404),
+        },
+      }),
+      validator(
+        "param",
+        z.object({
+          sessionID: z.string().meta({ description: "session id" }),
+        }),
+      ),
+      validator(
+        "json",
+        z.object({
+          clientID: z.string().optional().meta({ description: "client id (auto-generated if not provided)" }),
+        }),
+      ),
+      async (c) => {
+        const { sessionID } = c.req.valid("param")
+        const body = c.req.valid("json")
+
+        const clientID = body.clientID ?? SessionRegistry.generateClientID()
+        const userAgent = c.req.header("User-Agent")
+        const ipAddress = c.req.header("X-Forwarded-For") ?? c.req.header("X-Real-IP")
+
+        const success = SessionRegistry.attachClient(sessionID, clientID, {
+          userAgent,
+          ipAddress,
+        })
+
+        if (!success) {
+          return c.json({ success: false, error: "session not found" }, 404)
+        }
+
+        const session = SessionRegistry.getSession(sessionID)
+        return c.json({
+          success: true,
+          clientID,
+          session: session!,
+        })
+      },
+    )
+    .post(
+      "/:sessionID/detach",
+      describeRoute({
+        summary: "detach client from session",
+        description: "disconnect a client from a session",
+        operationId: "session.detach",
+        responses: {
+          200: {
+            description: "client detached successfully",
+            content: {
+              "application/json": {
+                schema: resolver(z.object({ success: z.boolean() })),
+              },
+            },
+          },
+        },
+      }),
+      validator(
+        "param",
+        z.object({
+          sessionID: z.string().meta({ description: "session id" }),
+        }),
+      ),
+      validator(
+        "json",
+        z.object({
+          clientID: z.string().meta({ description: "client id to detach" }),
+        }),
+      ),
+      async (c) => {
+        const { sessionID } = c.req.valid("param")
+        const { clientID } = c.req.valid("json")
+
+        const success = SessionRegistry.detachClient(sessionID, clientID)
+        return c.json({ success })
+      },
+    )
+    .get(
+      "/:sessionID/clients",
+      describeRoute({
+        summary: "list session clients",
+        description: "get all clients connected to a session",
+        operationId: "session.clients",
+        responses: {
+          200: {
+            description: "list of connected clients",
+            content: {
+              "application/json": {
+                schema: resolver(SessionRegistry.ClientInfo.array()),
+              },
+            },
+          },
+        },
+      }),
+      validator(
+        "param",
+        z.object({
+          sessionID: z.string().meta({ description: "session id" }),
+        }),
+      ),
+      async (c) => {
+        const { sessionID } = c.req.valid("param")
+        const clients = SessionRegistry.getSessionClients(sessionID)
+        return c.json(clients)
       },
     ),
 )
